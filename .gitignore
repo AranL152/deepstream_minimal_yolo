@@ -1,0 +1,33 @@
+# big local artifacts
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.engine
+*.plan
+
+# build outputs
+minimal_yolo
+*.o
+build/
+
+# --- Large local artifacts ---
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.engine
+*.plan
+*.onnx
+*.pt
+*.weights
+*.wts
+
+# build outputs
+minimal_yolo
+*.o
+*.so
+build.log
+
+# Windows "Zone.Identifier" junk
+*Zone.Identifier
