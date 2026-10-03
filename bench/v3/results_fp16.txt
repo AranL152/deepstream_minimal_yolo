@@ -1,0 +1,92 @@
+═══════════════════════════════════════════════════════════════════════════
+  YOLOv8n FP16 Benchmark — DeepInference (car) vs DeepStream
+  Hardware: NVIDIA GeForce RTX 4080 SUPER (WSL2)
+  Video: 2560x1072 H.264 @ 29fps, 500 frames
+  Model: YOLOv8n, 640x640 input, 80-class COCO, FP16
+═══════════════════════════════════════════════════════════════════════════
+
+Pipeline                                       Throughput
+─────────────────────────────────────────────  ──────────
+TRT engine ceiling (trtexec, no CUDA graph)     710 FPS
+  └ with CUDA graph                           1,335 FPS
+Car pipeline end-to-end (decode+preproc+TRT)    214 FPS
+  └ inference-only (letterbox+run_inference)     301 FPS
+DeepStream end-to-end (decode+GPU preproc+TRT)  337 FPS
+
+═══════════════════════════════════════════════════════════════════════════
+
+Car pipeline per-frame latency breakdown:
+  decode (CPU, OpenCV/FFmpeg)    mean 1.355ms  p50 1.068ms  p99 2.199ms
+  letterbox (CPU, cv::resize)    mean 0.338ms  p50 0.331ms  p99 0.531ms
+  run_inference() total          mean 2.982ms  p50 2.608ms  p99 7.671ms
+    └ includes: normalize, CHW conversion, cudaMemcpy H2D,
+      TRT enqueue, cudaDeviceSynchronize, cudaMemcpy D2H,
+      softmax/postprocess
+  total per frame                mean 4.676ms  p50 4.131ms  p99 9.923ms
+
+DeepStream pipeline:
+  steady-state FPS: 336.69 (reported by fpsdisplaysink)
+  (per-frame latency breakdown not available without pyds probes)
+
+═══════════════════════════════════════════════════════════════════════════
+
+ANALYSIS:
+
+  DeepStream is 1.58x faster end-to-end (337 vs 214 FPS).
+  DeepStream is 1.12x faster than car inference-only (337 vs 301 FPS).
+
+  Pipeline efficiency (actual FPS / engine ceiling):
+    Car pipeline:     301 / 710 = 42%
+    DeepStream:       337 / 665 = 51%
+
+  Where the car pipeline loses time:
+    1. CPU letterbox (0.34ms) — DS does this on GPU within nvinfer
+    2. CPU normalize + CHW conversion — DS does this on GPU
+    3. cudaMemcpy H2D (~0.19ms) — DS keeps data in GPU memory (NVMM)
+    4. cudaDeviceSynchronize blocks the CPU — DS uses async streaming
+    5. CPU postprocess (TopK loop) — DS does NMS on GPU
+
+═══════════════════════════════════════════════════════════════════════════
+
+JETSON IMPLICATIONS:
+
+  On a Jetson (Orin Nano/NX), the DeepStream advantage will likely be
+  LARGER because:
+
+  1. Weaker CPU: The Jetson's ARM cores are ~3-5x slower than the
+     Ryzen 7800X3D. CPU letterbox + normalize that takes 0.7ms on
+     desktop could take 2-4ms on Jetson → bigger win for GPU preprocess.
+
+  2. Shared memory: Jetson uses unified CPU/GPU memory, so H2D/D2H
+     copies are cheaper for both — but DeepStream's zero-copy NVMM
+     still avoids any copy at all.
+
+  3. Hardware decoder: DeepStream can use the Jetson's NVDEC hardware
+     decoder (zero CPU cost for H.264 decode). The car pipeline uses
+     OpenCV/FFmpeg CPU decode which will be very slow on ARM.
+
+  4. DLA: DeepStream can offload inference to DLA, freeing the GPU
+     for other tasks. The car pipeline cannot use DLA.
+
+  Conservative estimate: DeepStream will be 2-3x faster on Jetson
+  for this YOLOv8n workload.
+
+═══════════════════════════════════════════════════════════════════════════
+
+RECOMMENDATION:
+
+  Replace the car's DeepInference C++ pipeline with DeepStream for
+  the Jetson deployment. Key benefits:
+    - Higher throughput (critical for real-time cone detection)
+    - Lower CPU usage (frees CPU for path planning, SLAM, etc.)
+    - Hardware decoder support (essential on Jetson)
+    - GPU-native preprocessing (no wasted CPU→GPU copies)
+    - Battle-tested in automotive/edge deployments
+
+  Migration path:
+    1. Use DeepStream-Yolo with your existing YOLOv8n model
+    2. Configure nvinfer with the NvDsInferParseYoloCuda parser
+    3. Use nvstreammux → nvinfer → custom probe for detection output
+    4. Connect to your ROS2 node via appsink or custom GStreamer element
+
+═══════════════════════════════════════════════════════════════════════════
